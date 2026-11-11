@@ -8,7 +8,7 @@ const server = app.listen(port, () => {
 });
 
 
-if (db) {
+if (db && process.env.ENABLE_BACKGROUND_JOBS !== 'false') {
   let running = false;
   const tick = async () => {
     if (running) return;
