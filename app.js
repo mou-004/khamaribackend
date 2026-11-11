@@ -1,4 +1,8 @@
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> 4600934 (Fix backend CORS configuration)
 import cors from 'cors';
 
 import registerAuthExtra from './routes/auth-extra.js';
@@ -111,3 +115,8 @@ app.use((error, _req, res, _next) => {
 });
 
 export default app;
+<<<<<<< HEAD
+=======
+
+
+>>>>>>> 4600934 (Fix backend CORS configuration)
