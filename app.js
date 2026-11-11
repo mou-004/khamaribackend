@@ -1,6 +1,10 @@
+
+import cors from 'cors';
+
 import registerAuthExtra from './routes/auth-extra.js';
 import registerPaymentRoutes from './routes/payments.js';
 import { app } from './runtime.js';
+
 import registerAuthRoutes from './routes/auth.js';
 import registerHealthRoutes from './routes/health.js';
 import registerProductsRoutes from './routes/products.js';
@@ -16,6 +20,38 @@ import registerEngageRoutes from './routes/engage.js';
 import registerRefundRoutes from './routes/refunds.js';
 import registerPreOrderRoutes from './routes/preorders.js';
 import registerSupportRoutes from './routes/support.js';
+
+// ========================================
+// CORS CONFIGURATION
+// ========================================
+
+const allowedOrigins = [
+  'https://khamariclient.onrender.com',
+  'http://localhost:5173'
+];
+
+app.use(cors({
+  origin: allowedOrigins,
+  credentials: true,
+  methods: [
+    'GET',
+    'HEAD',
+    'POST',
+    'PUT',
+    'PATCH',
+    'DELETE',
+    'OPTIONS'
+  ],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization'
+  ],
+  optionsSuccessStatus: 204
+}));
+
+// ========================================
+// REGISTER API ROUTES
+// ========================================
 
 registerAuthRoutes(app);
 registerAuthExtra(app);
@@ -35,12 +71,35 @@ registerRefundRoutes(app);
 registerPreOrderRoutes(app);
 registerSupportRoutes(app);
 
-app.use((req, res) => res.status(404).json({ error: `Route not found: ${req.method} ${req.path}` }));
+// ========================================
+// 404 HANDLER
+// ========================================
+
+app.use((req, res) => {
+  res.status(404).json({
+    error: `Route not found: ${req.method} ${req.path}`
+  });
+});
+
+// ========================================
+// GLOBAL ERROR HANDLER
+// ========================================
 
 app.use((error, _req, res, _next) => {
-  if (error.status && error.status >= 400 && error.status <= 599) return res.status(error.status).json({ error: error.message });
+  if (
+    error.status &&
+    error.status >= 400 &&
+    error.status <= 599
+  ) {
+    return res.status(error.status).json({
+      error: error.message
+    });
+  }
+
   console.error(error);
+
   const diagnostic = process.env.NODE_ENV !== 'production';
+
   res.status(500).json({
     error: 'An unexpected server error occurred.',
     ...(diagnostic ? {
