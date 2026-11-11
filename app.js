@@ -1,10 +1,4 @@
 
-<<<<<<< HEAD
-=======
-
->>>>>>> 4600934 (Fix backend CORS configuration)
-import cors from 'cors';
-
 import registerAuthExtra from './routes/auth-extra.js';
 import registerPaymentRoutes from './routes/payments.js';
 import { app } from './runtime.js';
@@ -26,35 +20,8 @@ import registerPreOrderRoutes from './routes/preorders.js';
 import registerSupportRoutes from './routes/support.js';
 
 // ========================================
-// CORS CONFIGURATION
-// ========================================
-
-const allowedOrigins = [
-  'https://khamariclient.onrender.com',
-  'http://localhost:5173'
-];
-
-app.use(cors({
-  origin: allowedOrigins,
-  credentials: true,
-  methods: [
-    'GET',
-    'HEAD',
-    'POST',
-    'PUT',
-    'PATCH',
-    'DELETE',
-    'OPTIONS'
-  ],
-  allowedHeaders: [
-    'Content-Type',
-    'Authorization'
-  ],
-  optionsSuccessStatus: 204
-}));
-
-// ========================================
 // REGISTER API ROUTES
+// CORS is configured centrally in runtime.js
 // ========================================
 
 registerAuthRoutes(app);
@@ -115,8 +82,3 @@ app.use((error, _req, res, _next) => {
 });
 
 export default app;
-<<<<<<< HEAD
-=======
-
-
->>>>>>> 4600934 (Fix backend CORS configuration)

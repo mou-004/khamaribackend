@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import { fileURLToPath } from 'node:url';
 import { isAbsolute, resolve } from 'node:path';
 
+// Load local environment variables
 dotenv.config({
   path: fileURLToPath(new URL('../.env', import.meta.url))
 });
@@ -23,22 +24,55 @@ import {
 } from 'node:crypto';
 
 // ==========================================
-// EXPRESS APPLICATION
+// EXPRESS APPLICATION AND CORS
 // ==========================================
 
 const app = express();
 const port = Number(process.env.PORT || 5000);
 
+const configuredClientOrigins = String(
+  process.env.CLIENT_ORIGIN || ''
+)
+  .split(',')
+  .map(origin => origin.trim())
+  .filter(Boolean);
+
+const allowedOrigins = [
+  'https://khamariclient.onrender.com',
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'http://localhost:5175',
+  ...configuredClientOrigins
+];
+
+const corsOptions = {
+  origin: allowedOrigins,
+  credentials: true,
+  methods: [
+    'GET',
+    'HEAD',
+    'POST',
+    'PUT',
+    'PATCH',
+    'DELETE',
+    'OPTIONS'
+  ],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization'
+  ],
+  optionsSuccessStatus: 204
+};
+
+// CORS must be registered before all routes
+app.use(cors(corsOptions));
+
 app.use(helmet());
 
-app.use(cors({
-  origin: (
-    process.env.CLIENT_ORIGIN ||
-    'http://localhost:5173,http://localhost:5174,http://localhost:5175'
-  ).split(',').map(s => s.trim())
+app.use(express.json({
+  limit: '1mb'
 }));
 
-app.use(express.json({ limit: '1mb' }));
 app.use(morgan('dev'));
 
 // ==========================================
@@ -56,16 +90,22 @@ let db = null;
 
 try {
   let serviceAccount = null;
-  const privateKey = String(process.env.FIREBASE_PRIVATE_KEY || '')
+
+  const privateKey = String(
+    process.env.FIREBASE_PRIVATE_KEY || ''
+  )
     .replace(/\\r\\n/g, '\n')
     .replace(/\\n/g, '\n')
     .trim();
+
   const hasCompleteEnvCredentials = Boolean(
     process.env.FIREBASE_PROJECT_ID &&
     process.env.FIREBASE_CLIENT_EMAIL &&
     privateKey
   );
+
   let envKeyLooksValid = false;
+
   if (privateKey) {
     try {
       createPrivateKey(privateKey);
@@ -75,8 +115,7 @@ try {
     }
   }
 
-  // Prefer complete PEM environment credentials. If the private key is only a
-  // placeholder/hash or is malformed, fall back to the service-account JSON.
+  // Prefer valid PEM environment credentials.
   if (hasCompleteEnvCredentials && envKeyLooksValid) {
     serviceAccount = {
       project_id: process.env.FIREBASE_PROJECT_ID,
@@ -85,20 +124,41 @@ try {
     };
   } else {
     if (hasCompleteEnvCredentials && !envKeyLooksValid) {
-      console.warn('FIREBASE_PRIVATE_KEY is not a PEM private key; trying the service-account JSON file instead.');
+      console.warn(
+        'FIREBASE_PRIVATE_KEY is not a valid PEM private key; trying the service-account JSON file instead.'
+      );
     }
 
-    const configuredPath = String(process.env.GOOGLE_APPLICATION_CREDENTIALS || '').trim();
-    const projectRoot = fileURLToPath(new URL('../', import.meta.url));
-    const fallbackPath = fileURLToPath(new URL('../firebase-service-account.json', import.meta.url));
+    const configuredPath = String(
+      process.env.GOOGLE_APPLICATION_CREDENTIALS || ''
+    ).trim();
+
+    const projectRoot = fileURLToPath(
+      new URL('../', import.meta.url)
+    );
+
+    const fallbackPath = fileURLToPath(
+      new URL('../firebase-service-account.json', import.meta.url)
+    );
+
     const credentialPath = configuredPath
-      ? (isAbsolute(configuredPath) ? configuredPath : resolve(projectRoot, configuredPath))
+      ? (
+          isAbsolute(configuredPath)
+            ? configuredPath
+            : resolve(projectRoot, configuredPath)
+        )
       : fallbackPath;
 
     if (existsSync(credentialPath)) {
-      serviceAccount = JSON.parse(readFileSync(credentialPath, 'utf8').replace(/^\\uFEFF/, ''));
+      serviceAccount = JSON.parse(
+        readFileSync(credentialPath, 'utf8')
+          .replace(/^\uFEFF/, '')
+      );
+
       if (serviceAccount?.private_key) {
-        serviceAccount.private_key = String(serviceAccount.private_key)
+        serviceAccount.private_key = String(
+          serviceAccount.private_key
+        )
           .replace(/\\r\\n/g, '\n')
           .replace(/\\n/g, '\n')
           .trim();
@@ -107,28 +167,48 @@ try {
   }
 
   if (!serviceAccount) {
-    throw new Error('Firebase credentials are missing or invalid. Provide a valid PEM FIREBASE_PRIVATE_KEY or set GOOGLE_APPLICATION_CREDENTIALS to a valid service-account JSON file.');
+    throw new Error(
+      'Firebase credentials are missing or invalid. Provide a valid PEM FIREBASE_PRIVATE_KEY or set GOOGLE_APPLICATION_CREDENTIALS to a valid service-account JSON file.'
+    );
   }
 
   let serviceAccountKeyValid = false;
+
   try {
-    createPrivateKey(String(serviceAccount.private_key || ''));
+    createPrivateKey(
+      String(serviceAccount.private_key || '')
+    );
+
     serviceAccountKeyValid = true;
   } catch {
     serviceAccountKeyValid = false;
   }
 
-  if (!serviceAccount.project_id || !serviceAccount.client_email || !serviceAccountKeyValid) {
-    throw new Error('Firebase service-account credentials are incomplete or invalid. Check project_id, client_email and the PEM private_key in the JSON file.');
+  if (
+    !serviceAccount.project_id ||
+    !serviceAccount.client_email ||
+    !serviceAccountKeyValid
+  ) {
+    throw new Error(
+      'Firebase service-account credentials are incomplete or invalid. Check project_id, client_email and the PEM private_key in the JSON file.'
+    );
   }
 
   if (!admin.apps.length) {
-    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
   }
+
   db = admin.firestore();
+
   console.log('Firebase Admin connected.');
+
 } catch (error) {
-  console.error('Firebase initialization failed:', error.message);
+  console.error(
+    'Firebase initialization failed:',
+    error.message
+  );
 }
 
 // ==========================================
@@ -145,26 +225,37 @@ const smtpConfigured = Boolean(
 const mailer = smtpConfigured
   ? nodemailer.createTransport({
       host: process.env.SMTP_HOST,
-      port: Number(process.env.SMTP_PORT || 587),
+
+      port: Number(
+        process.env.SMTP_PORT || 587
+      ),
+
       secure:
         String(process.env.SMTP_SECURE || 'false') === 'true',
+
       auth: {
         user: process.env.SMTP_USER,
         pass: process.env.SMTP_PASS
       },
+
       connectionTimeout: 15000,
       greetingTimeout: 15000,
       socketTimeout: 20000
     })
   : null;
 
-let smtpStatus = mailer ? 'checking' : 'not-configured';
+let smtpStatus = mailer
+  ? 'checking'
+  : 'not-configured';
 
 if (mailer) {
   mailer.verify()
     .then(() => {
       smtpStatus = 'ready';
-      console.log('SMTP connection and authentication OK.');
+
+      console.log(
+        'SMTP connection and authentication OK.'
+      );
     })
     .catch(error => {
       smtpStatus = 'failed';
@@ -218,7 +309,10 @@ async function verifyFirebaseRequest(req) {
     : '';
 
   if (!token) {
-    throw httpError(401, 'Sign in is required.');
+    throw httpError(
+      401,
+      'Sign in is required.'
+    );
   }
 
   try {
@@ -235,7 +329,10 @@ async function verifyFirebaseRequest(req) {
 // AUTHENTICATED USER IDENTITY
 // ==========================================
 
-async function readIdentity(req, { required = true } = {}) {
+async function readIdentity(
+  req,
+  { required = true } = {}
+) {
   const header = req.headers.authorization || '';
 
   const token = header.startsWith('Bearer ')
@@ -281,7 +378,10 @@ async function readIdentity(req, { required = true } = {}) {
       profile = userDoc.data() || {};
     }
   } catch (error) {
-    console.error('User profile lookup failed:', error.message);
+    console.error(
+      'User profile lookup failed:',
+      error.message
+    );
   }
 
   const role = [
@@ -295,12 +395,13 @@ async function readIdentity(req, { required = true } = {}) {
   return {
     uid: decoded.uid,
 
-    // IMPORTANT: Customer email for OTP delivery
     email: String(
       decoded.email ||
       profile.email ||
       ''
-    ).trim().toLowerCase(),
+    )
+      .trim()
+      .toLowerCase(),
 
     name: String(
       profile.name ||
@@ -311,7 +412,9 @@ async function readIdentity(req, { required = true } = {}) {
 
     role,
 
-    status: String(profile.status || 'active')
+    status: String(
+      profile.status || 'active'
+    )
   };
 }
 
@@ -324,7 +427,10 @@ const requireUser = async (req, res, next) => {
     const identity = await readIdentity(req);
 
     if (!identity) {
-      throw httpError(401, 'Please sign in.');
+      throw httpError(
+        401,
+        'Please sign in.'
+      );
     }
 
     if (!identity.email) {
@@ -335,6 +441,7 @@ const requireUser = async (req, res, next) => {
     }
 
     req.identity = identity;
+
     next();
 
   } catch (error) {
@@ -346,13 +453,21 @@ const requireUser = async (req, res, next) => {
 // SELLER OR ADMIN MIDDLEWARE
 // ==========================================
 
-const requireSellerOrAdmin = async (req, res, next) => {
+const requireSellerOrAdmin = async (
+  req,
+  res,
+  next
+) => {
   try {
     const identity = await readIdentity(req);
 
     if (
-      !['seller', 'admin', 'superAdmin', 'super-admin']
-        .includes(identity.role)
+      ![
+        'seller',
+        'admin',
+        'superAdmin',
+        'super-admin'
+      ].includes(identity.role)
     ) {
       return res.status(403).json({
         error:
@@ -372,6 +487,7 @@ const requireSellerOrAdmin = async (req, res, next) => {
     }
 
     req.identity = identity;
+
     next();
 
   } catch (error) {
@@ -383,20 +499,29 @@ const requireSellerOrAdmin = async (req, res, next) => {
 // ADMIN MIDDLEWARE
 // ==========================================
 
-const requireAdmin = async (req, res, next) => {
+const requireAdmin = async (
+  req,
+  res,
+  next
+) => {
   try {
     const identity = await readIdentity(req);
 
     if (
-      !['admin', 'superAdmin', 'super-admin']
-        .includes(identity.role)
+      ![
+        'admin',
+        'superAdmin',
+        'super-admin'
+      ].includes(identity.role)
     ) {
       return res.status(403).json({
-        error: 'Administrator access is required.'
+        error:
+          'Administrator access is required.'
       });
     }
 
     req.identity = identity;
+
     next();
 
   } catch (error) {
@@ -408,14 +533,19 @@ const requireAdmin = async (req, res, next) => {
 // EMAIL DIAGNOSTIC ENDPOINT
 // ==========================================
 
-app.get('/api/payments/email-status', (req, res) => {
-  res.json({
-    configured: smtpConfigured,
-    status: smtpStatus,
-    host: process.env.SMTP_HOST || null,
-    senderConfigured: Boolean(process.env.SMTP_FROM)
-  });
-});
+app.get(
+  '/api/payments/email-status',
+  (req, res) => {
+    res.json({
+      configured: smtpConfigured,
+      status: smtpStatus,
+      host: process.env.SMTP_HOST || null,
+      senderConfigured: Boolean(
+        process.env.SMTP_FROM
+      )
+    });
+  }
+);
 
 // ==========================================
 // EXPORTS
@@ -448,8 +578,6 @@ export {
   otpDigest,
   safeRequestedRole,
   verifyFirebaseRequest,
-
-
 
   httpError,
   readIdentity,
