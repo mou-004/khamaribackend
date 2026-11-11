@@ -16,7 +16,7 @@ if (db) {
     try { await runAuctionJobs(); await runRefundJobs(); } catch (error) { console.error('Background job failed:', error.message); } finally { running = false; }
   };
   setTimeout(tick, 3000).unref();
-  setInterval(tick, 30000).unref();
+ setInterval(tick, 300000).unref();
 }
 
 server.on('error', (error) => {
