@@ -84,6 +84,27 @@ export async function notify(uid, title, body = '', link = '', type = '') {
     }
   } catch (error) { console.error('Notification failed:', error.message); }
 }
+// Sends the optional email copy for an order/payment event whose in-app
+// notification has already been saved. Uses Brevo first, with SMTP retained
+// as the configured alternative according to runtime.js.
+export async function emailNotification(uid, title, body = '', type = '') {
+  if (!emailConfigured || !uid || !['order', 'payment'].includes(type) || !db) return;
+  try {
+    const user = (await db.collection('users').doc(uid).get()).data();
+    const prefs = { ...DEFAULT_NOTIFY_PREFS, ...(user?.notifyPrefs || {}) };
+    if (!user?.email || prefs.email === false) return;
+
+    await mailer.sendMail({
+      from: process.env.BREVO_FROM_EMAIL || process.env.SMTP_FROM,
+      to: user.email,
+      subject: `Khamari: ${text(title, 100)}`,
+      text: `${text(body, 300)}\n\nOpen Khamari to see the details.`
+    });
+  } catch (error) {
+    console.error('Notification email failed:', error.message);
+  }
+}
+
 export async function notifyAdmins(title, body = '', link = '', type = 'account') {
   if (!db) return;
   try {
