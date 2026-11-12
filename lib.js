@@ -1,6 +1,5 @@
 // Shared helpers for the seller / admin / order APIs. Every new route uses these.
-import { admin, db, httpError, mailer, smtpConfigured } from './runtime.js';
-import { shouldCreateInAppNotification, shouldSendNotificationEmail } from './notification-policy.js';
+import { admin, db, httpError, mailer, emailConfigured } from './runtime.js';
 
 const ADMIN_ROLES = ['admin', 'superAdmin', 'super-admin'];
 
@@ -66,37 +65,25 @@ export const NOTIFY_TYPES = ['order', 'product', 'auction', 'payment', 'review',
 export const DEFAULT_NOTIFY_PREFS = { order: true, product: true, auction: true, payment: true, review: true, announcement: true, email: true };
 const inferType = (link = '') => (/order/.test(link) ? 'order' : /auction/.test(link) ? 'auction' : /earnings|payout/.test(link) ? 'payment' : /product/.test(link) ? 'product' : 'account');
 
-// Creates an in-app notification for one user. It respects that user's notification settings
-// (account messages are always delivered) and emails order/payment updates when SMTP is set up.
+// Creates an in-app notification for one user. Order/payment events are always
+// stored in-app; optional categories and email delivery respect user preferences.
 export async function notify(uid, title, body = '', link = '', type = '') {
   if (!uid || !db) return;
   try {
     const kind = NOTIFY_TYPES.includes(type) ? type : inferType(link);
     const user = (await db.collection('users').doc(uid).get()).data();
-    if (!user) { console.error(`Notification recipient not found: ${uid}`); return; }
+    if (!user) return;
     const prefs = { ...DEFAULT_NOTIFY_PREFS, ...(user.notifyPrefs || {}) };
-    // Always persist critical order/payment events in-app. Preferences may
-    // disable their email copy, but must never hide a marketplace transaction.
-    if (!shouldCreateInAppNotification(kind, prefs)) return;
+    // Order and payment events are transactional records: always create the in-app
+    // notification so a preference toggle cannot hide a purchase or payment event.
+    // Preferences continue to control optional notification categories and email.
+    if (!['account', 'order', 'payment'].includes(kind) && prefs[kind] === false) return;
     await db.collection('notifications').add({ userId: uid, type: kind, title: text(title, 120), body: text(body, 300), link, read: false, createdAt: stamp() });
-    if (smtpConfigured && user.email && shouldSendNotificationEmail(kind, prefs)) {
+    if (emailConfigured && user.email && prefs.email !== false && ['order', 'payment'].includes(kind)) {
       mailer.sendMail({ from: process.env.SMTP_FROM, to: user.email, subject: `Khamari: ${text(title, 100)}`, text: `${text(body, 300)}\n\nOpen Khamari to see the details.` }).catch(() => {});
     }
   } catch (error) { console.error('Notification failed:', error.message); }
 }
-
-// Send only the optional email copy for an event whose in-app notification was
-// already committed atomically with the order/payment record.
-export async function emailNotification(uid, title, body = '', type = '') {
-  if (!smtpConfigured || !uid || !['order', 'payment'].includes(type)) return;
-  try {
-    const user = (await db.collection('users').doc(uid).get()).data();
-    const prefs = { ...DEFAULT_NOTIFY_PREFS, ...(user?.notifyPrefs || {}) };
-    if (!user?.email || !shouldSendNotificationEmail(type, prefs)) return;
-    await mailer.sendMail({ from: process.env.SMTP_FROM, to: user.email, subject: `Khamari: ${text(title, 100)}`, text: `${text(body, 300)}\n\nOpen Khamari to see the details.` });
-  } catch (error) { console.error('Notification email failed:', error.message); }
-}
-
 export async function notifyAdmins(title, body = '', link = '', type = 'account') {
   if (!db) return;
   try {

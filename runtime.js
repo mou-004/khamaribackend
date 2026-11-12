@@ -1,10 +1,10 @@
-
 import { readFileSync, existsSync } from 'node:fs';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'node:url';
 import { isAbsolute, resolve } from 'node:path';
 
-// Load local environment variables
+// Load a local .env file when running locally. Render environment variables
+// take precedence because dotenv does not overwrite existing process.env values.
 dotenv.config({
   path: fileURLToPath(new URL('../.env', import.meta.url))
 });
@@ -30,9 +30,7 @@ import {
 const app = express();
 const port = Number(process.env.PORT || 5000);
 
-const configuredClientOrigins = String(
-  process.env.CLIENT_ORIGIN || ''
-)
+const configuredClientOrigins = String(process.env.CLIENT_ORIGIN || '')
   .split(',')
   .map(origin => origin.trim())
   .filter(Boolean);
@@ -64,15 +62,11 @@ const corsOptions = {
   optionsSuccessStatus: 204
 };
 
-// CORS must be registered before all routes
+// Register CORS before other middleware and before all routes so that
+// normal requests and browser OPTIONS preflight requests are both handled.
 app.use(cors(corsOptions));
-
 app.use(helmet());
-
-app.use(express.json({
-  limit: '1mb'
-}));
-
+app.use(express.json({ limit: '1mb' }));
 app.use(morgan('dev'));
 
 // ==========================================
@@ -91,9 +85,8 @@ let db = null;
 try {
   let serviceAccount = null;
 
-  const privateKey = String(
-    process.env.FIREBASE_PRIVATE_KEY || ''
-  )
+  // Render may store PEM line breaks as literal \n characters.
+  const privateKey = String(process.env.FIREBASE_PRIVATE_KEY || '')
     .replace(/\\r\\n/g, '\n')
     .replace(/\\n/g, '\n')
     .trim();
@@ -115,7 +108,8 @@ try {
     }
   }
 
-  // Prefer valid PEM environment credentials.
+  // Prefer complete PEM environment credentials. If the private key is a
+  // placeholder/hash or malformed, try the service-account JSON file instead.
   if (hasCompleteEnvCredentials && envKeyLooksValid) {
     serviceAccount = {
       project_id: process.env.FIREBASE_PROJECT_ID,
@@ -133,32 +127,24 @@ try {
       process.env.GOOGLE_APPLICATION_CREDENTIALS || ''
     ).trim();
 
-    const projectRoot = fileURLToPath(
-      new URL('../', import.meta.url)
-    );
-
+    const projectRoot = fileURLToPath(new URL('../', import.meta.url));
     const fallbackPath = fileURLToPath(
       new URL('../firebase-service-account.json', import.meta.url)
     );
 
     const credentialPath = configuredPath
-      ? (
-          isAbsolute(configuredPath)
-            ? configuredPath
-            : resolve(projectRoot, configuredPath)
-        )
+      ? (isAbsolute(configuredPath)
+          ? configuredPath
+          : resolve(projectRoot, configuredPath))
       : fallbackPath;
 
     if (existsSync(credentialPath)) {
       serviceAccount = JSON.parse(
-        readFileSync(credentialPath, 'utf8')
-          .replace(/^\uFEFF/, '')
+        readFileSync(credentialPath, 'utf8').replace(/^\uFEFF/, '')
       );
 
       if (serviceAccount?.private_key) {
-        serviceAccount.private_key = String(
-          serviceAccount.private_key
-        )
+        serviceAccount.private_key = String(serviceAccount.private_key)
           .replace(/\\r\\n/g, '\n')
           .replace(/\\n/g, '\n')
           .trim();
@@ -175,10 +161,7 @@ try {
   let serviceAccountKeyValid = false;
 
   try {
-    createPrivateKey(
-      String(serviceAccount.private_key || '')
-    );
-
+    createPrivateKey(String(serviceAccount.private_key || ''));
     serviceAccountKeyValid = true;
   } catch {
     serviceAccountKeyValid = false;
@@ -201,18 +184,13 @@ try {
   }
 
   db = admin.firestore();
-
   console.log('Firebase Admin connected.');
-
 } catch (error) {
-  console.error(
-    'Firebase initialization failed:',
-    error.message
-  );
+  console.error('Firebase initialization failed:', error.message);
 }
 
 // ==========================================
-// SMTP EMAIL CONFIGURATION
+// EMAIL CONFIGURATION: BREVO API + SMTP
 // ==========================================
 
 const smtpConfigured = Boolean(
@@ -222,51 +200,206 @@ const smtpConfigured = Boolean(
   process.env.SMTP_FROM
 );
 
-const mailer = smtpConfigured
+const brevoSenderEmail = String(
+  process.env.BREVO_FROM_EMAIL || ''
+).trim();
+
+const brevoConfigured = Boolean(
+  process.env.BREVO_API_KEY && brevoSenderEmail
+);
+
+const emailConfigured = brevoConfigured || smtpConfigured;
+
+// Keep the real SMTP transport available. Render Free may block outbound SMTP,
+// but this remains usable locally or on hosts that permit SMTP connections.
+const smtpMailer = smtpConfigured
   ? nodemailer.createTransport({
       host: process.env.SMTP_HOST,
-
-      port: Number(
-        process.env.SMTP_PORT || 587
-      ),
-
-      secure:
-        String(process.env.SMTP_SECURE || 'false') === 'true',
-
+      port: Number(process.env.SMTP_PORT || 587),
+      secure: String(process.env.SMTP_SECURE || 'false') === 'true',
       auth: {
         user: process.env.SMTP_USER,
         pass: process.env.SMTP_PASS
       },
-
-      connectionTimeout: 15000,
-      greetingTimeout: 15000,
-      socketTimeout: 20000
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 15000
     })
   : null;
 
-let smtpStatus = mailer
-  ? 'checking'
-  : 'not-configured';
+function parseEmailAddress(value) {
+  if (value && typeof value === 'object' && value.email) {
+    return {
+      email: String(value.email).trim(),
+      name: String(value.name || '').trim()
+    };
+  }
 
-if (mailer) {
-  mailer.verify()
+  const raw = String(value || '').trim();
+  const match = raw.match(/^(.*?)\s*<([^<>]+)>$/);
+  if (match) {
+    return {
+      name: match[1].replace(/^['"]|['"]$/g, '').trim(),
+      email: match[2].trim()
+    };
+  }
+  return { email: raw, name: '' };
+}
+
+function normaliseRecipients(value) {
+  const values = Array.isArray(value) ? value : [value];
+  return values
+    .flatMap(item => typeof item === 'string' && item.includes(',')
+      ? item.split(',')
+      : [item])
+    .map(parseEmailAddress)
+    .filter(item => item.email);
+}
+
+async function sendViaBrevo(message) {
+  const senderFromMessage = parseEmailAddress(message.from || process.env.SMTP_FROM);
+  const sender = {
+    email: brevoSenderEmail || senderFromMessage.email,
+    name: String(
+      process.env.BREVO_FROM_NAME || senderFromMessage.name || 'Khamari'
+    ).trim()
+  };
+  const to = normaliseRecipients(message.to).map(({ email, name }) =>
+    name ? { email, name } : { email }
+  );
+
+  if (!process.env.BREVO_API_KEY) {
+    throw new Error('BREVO_API_KEY is not configured.');
+  }
+  if (!sender.email) {
+    throw new Error('BREVO_FROM_EMAIL is not configured.');
+  }
+  if (!to.length) {
+    throw new Error('No valid recipient email address was supplied.');
+  }
+
+  const payload = {
+    sender,
+    to,
+    subject: String(message.subject || 'Khamari notification'),
+    ...(message.text ? { textContent: String(message.text) } : {}),
+    ...(message.html ? { htmlContent: String(message.html) } : {})
+  };
+
+  const cc = normaliseRecipients(message.cc).map(({ email, name }) =>
+    name ? { email, name } : { email }
+  );
+  const bcc = normaliseRecipients(message.bcc).map(({ email, name }) =>
+    name ? { email, name } : { email }
+  );
+  if (cc.length) payload.cc = cc;
+  if (bcc.length) payload.bcc = bcc;
+
+  const replyTo = parseEmailAddress(message.replyTo);
+  if (replyTo.email) {
+    payload.replyTo = replyTo.name
+      ? { email: replyTo.email, name: replyTo.name }
+      : { email: replyTo.email };
+  }
+
+  // Support simple Nodemailer attachments as well as the existing text/HTML emails.
+  if (Array.isArray(message.attachments) && message.attachments.length) {
+    payload.attachment = message.attachments.map(item => {
+      if (item.content != null) {
+        const content = Buffer.isBuffer(item.content)
+          ? item.content.toString('base64')
+          : Buffer.from(String(item.content), item.encoding === 'base64' ? 'base64' : 'utf8').toString('base64');
+        return { name: item.filename || item.name || 'attachment', content };
+      }
+      if (item.path && /^https:\/\//i.test(String(item.path))) {
+        return { name: item.filename || item.name || 'attachment', url: String(item.path) };
+      }
+      if (item.path) {
+        return {
+          name: item.filename || item.name || 'attachment',
+          content: readFileSync(item.path).toString('base64')
+        };
+      }
+      throw new Error('Unsupported email attachment format for Brevo.');
+    });
+  }
+
+  const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: {
+      'accept': 'application/json',
+      'api-key': process.env.BREVO_API_KEY,
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(15000)
+  });
+
+  const responseText = await response.text();
+  let responseData = {};
+  try { responseData = responseText ? JSON.parse(responseText) : {}; } catch { /* keep raw response out of user-facing errors */ }
+
+  if (!response.ok) {
+    const error = new Error(
+      responseData.message || `Brevo email API returned HTTP ${response.status}.`
+    );
+    error.code = 'BREVO_API_ERROR';
+    error.status = response.status;
+    throw error;
+  }
+
+  return {
+    accepted: to.map(item => item.email),
+    rejected: [],
+    messageId: responseData.messageId || null,
+    provider: 'brevo'
+  };
+}
+
+let smtpStatus = smtpMailer ? 'checking' : 'not-configured';
+let emailStatus = brevoConfigured ? 'configured' : smtpStatus;
+
+if (smtpMailer) {
+  smtpMailer.verify()
     .then(() => {
       smtpStatus = 'ready';
-
-      console.log(
-        'SMTP connection and authentication OK.'
-      );
+      if (!brevoConfigured) emailStatus = 'ready';
+      console.log('SMTP connection and authentication OK.');
     })
     .catch(error => {
       smtpStatus = 'failed';
-
-      console.error(
-        'SMTP verification failed:',
-        error.code,
-        error.message
-      );
+      if (!brevoConfigured) emailStatus = 'failed';
+      console.error('SMTP verification failed:', error.code, error.message);
     });
 }
+
+// Existing route files can continue calling mailer.sendMail(...).
+// Brevo is preferred when configured. SMTP remains available when Brevo is
+// not configured, or as an opt-in fallback on hosts that permit SMTP.
+const mailer = emailConfigured
+  ? {
+      async sendMail(message) {
+        if (brevoConfigured) {
+          try {
+            return await sendViaBrevo(message);
+          } catch (error) {
+            const smtpFallbackEnabled =
+              String(process.env.EMAIL_SMTP_FALLBACK || 'false').toLowerCase() === 'true';
+            if (!smtpMailer || !smtpFallbackEnabled) throw error;
+            console.warn('Brevo send failed; trying configured SMTP fallback:', error.message);
+            return smtpMailer.sendMail(message);
+          }
+        }
+        if (smtpMailer) return smtpMailer.sendMail(message);
+        throw new Error('No email provider is configured.');
+      },
+      // Kept for the existing SMTP diagnostic endpoint.
+      verify() {
+        if (!smtpMailer) throw new Error('SMTP is not configured.');
+        return smtpMailer.verify();
+      }
+    }
+  : null;
 
 // ==========================================
 // OTP HASH
@@ -296,23 +429,16 @@ const safeRequestedRole = role =>
 
 async function verifyFirebaseRequest(req) {
   if (!admin.apps.length || !db) {
-    throw httpError(
-      503,
-      'Firebase Admin is not configured.'
-    );
+    throw httpError(503, 'Firebase Admin is not configured.');
   }
 
   const header = req.headers.authorization || '';
-
   const token = header.startsWith('Bearer ')
     ? header.slice(7)
     : '';
 
   if (!token) {
-    throw httpError(
-      401,
-      'Sign in is required.'
-    );
+    throw httpError(401, 'Sign in is required.');
   }
 
   try {
@@ -329,12 +455,8 @@ async function verifyFirebaseRequest(req) {
 // AUTHENTICATED USER IDENTITY
 // ==========================================
 
-async function readIdentity(
-  req,
-  { required = true } = {}
-) {
+async function readIdentity(req, { required = true } = {}) {
   const header = req.headers.authorization || '';
-
   const token = header.startsWith('Bearer ')
     ? header.slice(7)
     : '';
@@ -347,10 +469,7 @@ async function readIdentity(
   }
 
   if (!token && required) {
-    throw httpError(
-      401,
-      'A Firebase sign-in token is required.'
-    );
+    throw httpError(401, 'A Firebase sign-in token is required.');
   }
 
   if (!token) return null;
@@ -378,10 +497,7 @@ async function readIdentity(
       profile = userDoc.data() || {};
     }
   } catch (error) {
-    console.error(
-      'User profile lookup failed:',
-      error.message
-    );
+    console.error('User profile lookup failed:', error.message);
   }
 
   const role = [
@@ -395,13 +511,12 @@ async function readIdentity(
   return {
     uid: decoded.uid,
 
+    // Customer email is used for OTP delivery.
     email: String(
       decoded.email ||
       profile.email ||
       ''
-    )
-      .trim()
-      .toLowerCase(),
+    ).trim().toLowerCase(),
 
     name: String(
       profile.name ||
@@ -411,10 +526,7 @@ async function readIdentity(
     ).slice(0, 80),
 
     role,
-
-    status: String(
-      profile.status || 'active'
-    )
+    status: String(profile.status || 'active')
   };
 }
 
@@ -427,10 +539,7 @@ const requireUser = async (req, res, next) => {
     const identity = await readIdentity(req);
 
     if (!identity) {
-      throw httpError(
-        401,
-        'Please sign in.'
-      );
+      throw httpError(401, 'Please sign in.');
     }
 
     if (!identity.email) {
@@ -441,9 +550,7 @@ const requireUser = async (req, res, next) => {
     }
 
     req.identity = identity;
-
     next();
-
   } catch (error) {
     next(error);
   }
@@ -453,21 +560,13 @@ const requireUser = async (req, res, next) => {
 // SELLER OR ADMIN MIDDLEWARE
 // ==========================================
 
-const requireSellerOrAdmin = async (
-  req,
-  res,
-  next
-) => {
+const requireSellerOrAdmin = async (req, res, next) => {
   try {
     const identity = await readIdentity(req);
 
     if (
-      ![
-        'seller',
-        'admin',
-        'superAdmin',
-        'super-admin'
-      ].includes(identity.role)
+      !['seller', 'admin', 'superAdmin', 'super-admin']
+        .includes(identity.role)
     ) {
       return res.status(403).json({
         error:
@@ -487,9 +586,7 @@ const requireSellerOrAdmin = async (
     }
 
     req.identity = identity;
-
     next();
-
   } catch (error) {
     next(error);
   }
@@ -499,31 +596,21 @@ const requireSellerOrAdmin = async (
 // ADMIN MIDDLEWARE
 // ==========================================
 
-const requireAdmin = async (
-  req,
-  res,
-  next
-) => {
+const requireAdmin = async (req, res, next) => {
   try {
     const identity = await readIdentity(req);
 
     if (
-      ![
-        'admin',
-        'superAdmin',
-        'super-admin'
-      ].includes(identity.role)
+      !['admin', 'superAdmin', 'super-admin']
+        .includes(identity.role)
     ) {
       return res.status(403).json({
-        error:
-          'Administrator access is required.'
+        error: 'Administrator access is required.'
       });
     }
 
     req.identity = identity;
-
     next();
-
   } catch (error) {
     next(error);
   }
@@ -533,19 +620,17 @@ const requireAdmin = async (
 // EMAIL DIAGNOSTIC ENDPOINT
 // ==========================================
 
-app.get(
-  '/api/payments/email-status',
-  (req, res) => {
-    res.json({
-      configured: smtpConfigured,
-      status: smtpStatus,
-      host: process.env.SMTP_HOST || null,
-      senderConfigured: Boolean(
-        process.env.SMTP_FROM
-      )
-    });
-  }
-);
+app.get('/api/payments/email-status', (req, res) => {
+  res.json({
+    configured: emailConfigured,
+    status: emailStatus,
+    provider: brevoConfigured ? 'brevo' : (smtpConfigured ? 'smtp' : 'not-configured'),
+    brevoConfigured,
+    smtpConfigured,
+    smtpStatus,
+    senderConfigured: Boolean(process.env.BREVO_FROM_EMAIL || process.env.SMTP_FROM)
+  });
+});
 
 // ==========================================
 // EXPORTS
@@ -572,6 +657,10 @@ export {
   db,
 
   smtpConfigured,
+  smtpMailer,
+  brevoConfigured,
+  emailConfigured,
+  emailStatus,
   mailer,
   smtpStatus,
 

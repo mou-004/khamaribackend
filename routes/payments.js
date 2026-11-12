@@ -8,6 +8,10 @@ import {
   otpDigest,
   timingSafeEqual,
   smtpConfigured,
+  smtpMailer,
+  brevoConfigured,
+  emailConfigured,
+  emailStatus,
   smtpStatus
 } from '../runtime.js';
 
@@ -59,9 +63,13 @@ export default function registerPaymentRoutes(app) {
   app.get('/api/payments/email-status', requireUser, (req, res) => {
 
     res.json({
-      configured: smtpConfigured,
-      status: smtpStatus,
-      senderConfigured: Boolean(process.env.SMTP_FROM),
+      configured: emailConfigured,
+      status: emailStatus,
+      provider: brevoConfigured ? 'brevo' : (smtpConfigured ? 'smtp' : 'not-configured'),
+      brevoConfigured,
+      smtpConfigured,
+      smtpStatus,
+      senderConfigured: Boolean(process.env.BREVO_FROM_EMAIL || process.env.SMTP_FROM),
       customerEmailAvailable: Boolean(req.identity.email)
     });
 
@@ -71,13 +79,13 @@ export default function registerPaymentRoutes(app) {
   // Admin-only live SMTP diagnostic: verifies the configured transport and sends a test message.
   app.post('/api/admin/payments/smtp-test', requireAdminUser, async (req, res, next) => {
     try {
-      if (!smtpConfigured || !mailer) {
-        throw httpError(503, 'SMTP is not configured. Add SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS and SMTP_FROM to backend .env.');
+      if (!smtpConfigured || !smtpMailer) {
+        throw httpError(503, 'SMTP is not configured. Add SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS and SMTP_FROM to test SMTP.');
       }
       const recipient = String(req.identity.email || '').trim().toLowerCase();
       if (!recipient) throw httpError(400, 'The signed-in admin account has no email address for the SMTP test.');
-      await mailer.verify();
-      const info = await mailer.sendMail({
+      await smtpMailer.verify();
+      const info = await smtpMailer.sendMail({
         from: process.env.SMTP_FROM,
         to: recipient,
         subject: 'Khamari SMTP test successful',
@@ -93,7 +101,7 @@ export default function registerPaymentRoutes(app) {
   });
 
   // =====================================
-  // SEND EMAIL OTP (SMTP ONLY)
+  // SEND EMAIL OTP (BREVO API PRIMARY, SMTP AVAILABLE)
   // =====================================
 
   app.post(
@@ -107,7 +115,7 @@ export default function registerPaymentRoutes(app) {
         }
 
         if (!db) throw httpError(503, 'Firebase database is unavailable.');
-        if (!mailer) throw httpError(503, 'Email service is not configured. Configure SMTP before checkout.');
+        if (!mailer) throw httpError(503, 'Email service is not configured. Add BREVO_API_KEY and BREVO_FROM_EMAIL, or configure SMTP.');
 
         // Email OTP is an account-verification step only. It must not depend on
         // a merchant account number or payment-gateway credentials.
@@ -137,7 +145,7 @@ export default function registerPaymentRoutes(app) {
           email,
           method,
           otpHash: otpDigest(req.identity.uid, code),
-          expiresAt: admin.firestore.Timestamp.fromMillis(now + 10 * 60 * 1000),
+          expiresAt: admin.firestore.Timestamp.fromMillis(now + 5 * 60 * 1000),
           lastSentAt: admin.firestore.Timestamp.fromMillis(now),
           attempts: 0,
           verifiedAt: null,
@@ -149,14 +157,14 @@ export default function registerPaymentRoutes(app) {
             from: process.env.SMTP_FROM,
             to: email,
             subject: `Khamari ${method.toUpperCase()} checkout verification OTP`,
-            text: `Your Khamari checkout email verification code is ${code}. It expires in 10 minutes. This code verifies your email only; it does not make a payment. Do not share this code.`,
+            text: `Your Khamari checkout email verification code is ${code}. It expires in 5 minutes. This code verifies your email only; it does not make a payment. Do not share this code.`,
             html: `
               <div style="font-family:Arial,sans-serif;max-width:500px;margin:auto;padding:25px;border:1px solid #eee;border-radius:12px">
                 <h2 style="color:#25804b">Khamari email verification</h2>
                 <p>You selected ${method.toUpperCase()} for your order.</p>
                 <p>Your email verification code is:</p>
                 <h1 style="letter-spacing:10px;color:#25804b;font-size:34px">${code}</h1>
-                <p>This code expires in 10 minutes.</p>
+                <p>This code expires in 5 minutes.</p>
                 <p><strong>This verifies your email only. It does not transfer or confirm payment.</strong></p>
                 <p>Never share your OTP with anyone.</p>
               </div>
@@ -169,7 +177,7 @@ export default function registerPaymentRoutes(app) {
         } catch (emailError) {
           await ref.delete().catch(() => {});
           console.error('Khamari OTP email error:', emailError.code, emailError.message);
-          throw httpError(502, 'OTP email could not be sent. Check Gmail SMTP configuration and try again.');
+          throw httpError(502, 'OTP email could not be sent. Check the Brevo API key and verified sender email. SMTP fallback is optional.');
         }
 
         res.json({
@@ -440,7 +448,7 @@ export default function registerPaymentRoutes(app) {
 
           createdAt: stamp()
 
-        }).catch((error) => console.error('[payments:review] audit write failed:', error.message));
+        });
 
         await notify(
           order.customerId,
@@ -449,13 +457,24 @@ export default function registerPaymentRoutes(app) {
           'payments',
           'payment'
         );
-        await notify(
-          order.sellerUid || order.sellerId,
-          status === 'paid' ? 'Customer payment confirmed' : 'Customer payment was rejected',
-          `${order.orderNumber} · ${order.paymentMethod} · ৳${order.total} · ${status}.`,
-          'seller-orders',
-          'payment'
-        );
+
+        // Keep the seller informed when Khamari admin verifies/rejects an
+        // online payment. COD orders never enter this payment-review route.
+        const itemSellerUids = [...new Set((order.items || [])
+          .map((item) => String(item.sellerUid || item.sellerId || '').trim())
+          .filter(Boolean))];
+        const sellerUid = itemSellerUids.length === 1
+          ? itemSellerUids[0]
+          : String(order.sellerUid || order.sellerId || '').trim();
+        if (sellerUid) {
+          await notify(
+            sellerUid,
+            status === 'paid' ? 'Customer payment verified' : 'Customer payment rejected',
+            `${order.orderNumber} · ${order.paymentMethod || 'online payment'} · ৳${order.total || 0} · ${status === 'paid' ? 'Payment verified by Khamari admin.' : `Payment was rejected.${req.body?.note ? ` Note: ${text(req.body.note, 160)}` : ''}`}`,
+            'seller-orders',
+            'payment'
+          );
+        }
 
         res.json({
           message: `Payment ${status}.`

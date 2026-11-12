@@ -19,11 +19,9 @@ import registerRefundRoutes from './routes/refunds.js';
 import registerPreOrderRoutes from './routes/preorders.js';
 import registerSupportRoutes from './routes/support.js';
 
-// ========================================
-// REGISTER API ROUTES
 // CORS is configured centrally in runtime.js
-// ========================================
 
+// Register API routes
 registerAuthRoutes(app);
 registerAuthExtra(app);
 registerPaymentRoutes(app);
@@ -42,20 +40,14 @@ registerRefundRoutes(app);
 registerPreOrderRoutes(app);
 registerSupportRoutes(app);
 
-// ========================================
-// 404 HANDLER
-// ========================================
-
+// 404 handler
 app.use((req, res) => {
   res.status(404).json({
     error: `Route not found: ${req.method} ${req.path}`
   });
 });
 
-// ========================================
-// GLOBAL ERROR HANDLER
-// ========================================
-
+// Global error handler
 app.use((error, _req, res, _next) => {
   if (
     error.status &&
